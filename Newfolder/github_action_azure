@@ -1,0 +1,105 @@
+on:
+  push:
+    branches:
+    - '**'
+  
+  workflow_dispatch:
+
+name: 'Terraform Plan & Apply'
+
+defaults:
+  run:
+    working-directory: ./terraform  
+
+env:
+  ARM_TENANT_ID: <>
+  TERRAFORM_VERSION: 1.2.1
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+jobs:
+  terraform_init_and_Plan:  
+    name: 'Terraform Plan'
+    runs-on: pcoe-runner-linux-prod
+    environment:
+      name: terraform-plan-dev
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Get AZ Subscription
+      run: |
+          if ${{ github.base_ref == 'dev' }}
+          then
+            echo "workspace=dev" >> $GITHUB_ENV
+            echo "Setting up the subscription"
+            az account set --subscription edvrt9-045356-4878933-4800-ed6zdf4ea36 
+          elif ${{ github.ref == 'master' }}
+          then
+            echo "workspace=prod" >> $GITHUB_ENV
+            echo "Setting up the subscription"
+            az account set --subscription esd9-0156-4833-9400-ed6b8ff4ea36 
+          elif ${{ github.ref == 'test' }}
+          then
+            echo "workspace=test" >> $GITHUB_ENV
+            echo "Setting up the subscription"
+            az account set --subscription e72sdf359-0156-4833-9400-ed6b8ff4ea36
+          else
+            echo "workspace=dev" >> $GITHUB_ENV
+            echo "Setting up the subscription"
+            az account set --subscription 1fsfdc32-b8a0-48b2-8548-606380683129
+          fi
+    - name: Azure Login
+      uses: azure/login@v1       
+      with: 
+        if: $workspace == 'prod'
+        creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+        elif: $workspace == 'test' 
+        creds: ${{ secrets.AZURE_CREDENTIALS_TEST }}
+        else:
+        creds: ${{ secrets.AZURE_CREDENTIALS_DEV }}
+
+    - name: Get Github Credenitals Token (shared modules)
+      uses: tibdex/github-app-token@v1.7.0
+      id: get-github-app-token
+      with:
+        app_id: ${{ secrets.GIT_APP_ID }}
+        private_key: ${{ secrets.GIT_APP_PRIVATE_KEY }}
+        # Please note these variables cannot be stored as environment variables due to being multiline and this causing errors.
+ 
+      # Replace git url to be able to clone private tf modules.
+    - name: Use Github Credenitals Token (shared modules)
+      run: |
+        git config --local --remove-section http."https://github.com/"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/df-UK".insteadOf "https://github.com/dsvv-UK"
+      env:
+        GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
+        
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Terraform Init
+      run: |
+        terraform init -var-file=vars/$workspace.tfvars
+        terraform workspace select $workspace || terraform workspace new $workspace
+    
+    - name: Terraform Validate
+      run: terraform validate    
+
+    - name: Terraform Plan
+      run: |
+        terraform plan -var-file=vars/$workspace.tfvars -out=terraform.plan
+
+    - name: Terraform Apply
+      if: github.ref_name == 'dev' || github.ref_name == 'test' || github.ref_name == 'prod'
+      run: |
+        terraform apply terraform.plan
+
+    - name: Azure Logout
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          az logout
+          az cache purge
+          az account clear
