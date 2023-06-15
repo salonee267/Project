@@ -1,62 +1,52 @@
+name: 'Terraform_plan_apply'
+
 on:
   push:
     branches:
-    - '**'
-  
+    - main
+  pull_request:
+    
   workflow_dispatch:
-
-name: 'Terraform Plan & Apply'
+    inputs:
+      environment:
+        description: "Environments to deploy"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
 
 defaults:
   run:
     working-directory: ./terraform  
 
-env:
-  ARM_TENANT_ID: <>
-  TERRAFORM_VERSION: 1.2.1
-  GH_TOKEN: ${{ secrets.GH_TOKEN }}
-
 jobs:
-  terraform_init_and_Plan:  
-    name: 'Terraform Plan'
-    runs-on: pcoe-runner-linux-prod
+  dev-plan:
+    name: 'Dev - Terraform Plan'
+    runs-on: pcfevrveoe-runner-linux-prod
+    permissions:
+      id-token: write
+      contents: read
     environment:
       name: terraform-plan-dev
+    env:
+      TF_WORKSPACE: dev
+      ARM_TENANT_ID: <>
+      TERRAFORM_VERSION: 1.2.1
+      ARM_SUBSCRIPTION_ID: <>
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+
     steps:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Get AZ Subscription
-      run: |
-          if ${{ github.base_ref == 'dev' }}
-          then
-            echo "workspace=dev" >> $GITHUB_ENV
-            echo "Setting up the subscription"
-            az account set --subscription edvrt9-045356-4878933-4800-ed6zdf4ea36 
-          elif ${{ github.ref == 'master' }}
-          then
-            echo "workspace=prod" >> $GITHUB_ENV
-            echo "Setting up the subscription"
-            az account set --subscription esd9-0156-4833-9400-ed6b8ff4ea36 
-          elif ${{ github.ref == 'test' }}
-          then
-            echo "workspace=test" >> $GITHUB_ENV
-            echo "Setting up the subscription"
-            az account set --subscription e72sdf359-0156-4833-9400-ed6b8ff4ea36
-          else
-            echo "workspace=dev" >> $GITHUB_ENV
-            echo "Setting up the subscription"
-            az account set --subscription 1fsfdc32-b8a0-48b2-8548-606380683129
-          fi
     - name: Azure Login
       uses: azure/login@v1       
       with: 
-        if: $workspace == 'prod'
-        creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
-        elif: $workspace == 'test' 
-        creds: ${{ secrets.AZURE_CREDENTIALS_TEST }}
-        else:
-        creds: ${{ secrets.AZURE_CREDENTIALS_DEV }}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Get Github Credenitals Token (shared modules)
       uses: tibdex/github-app-token@v1.7.0
@@ -70,7 +60,7 @@ jobs:
     - name: Use Github Credenitals Token (shared modules)
       run: |
         git config --local --remove-section http."https://github.com/"
-        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/df-UK".insteadOf "https://github.com/dsvv-UK"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/<>".insteadOf "https://github.com/<>"
       env:
         GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
         
@@ -81,25 +71,341 @@ jobs:
     
     - name: Terraform Init
       run: |
-        terraform init -var-file=vars/$workspace.tfvars
-        terraform workspace select $workspace || terraform workspace new $workspace
+        terraform init -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars
     
     - name: Terraform Validate
       run: terraform validate    
 
     - name: Terraform Plan
       run: |
-        terraform plan -var-file=vars/$workspace.tfvars -out=terraform.plan
+        terraform plan -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -out=terraform.plan
+
+    - name: Upload Plan Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.TF_WORKSPACE }}_plan
+        path: |
+          ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform/terraform.plan
+          ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform/terraform_plan.txt
+
+  dev-apply:
+    if: github.event_name != 'pull_request'
+    needs: dev-plan
+    name: 'Dev - Terraform Apply'
+    runs-on: pcdtyroe-runner-linux-prod
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: terraform-apply-dev
+    env:
+      TF_WORKSPACE: dev
+      ARM_TENANT_ID: <>
+      TERRAFORM_VERSION: 1.2.1
+      ARM_SUBSCRIPTION_ID: <>
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Get Github Credenitals Token (shared modules)
+      uses: tibdex/github-app-token@v1.7.0
+      id: get-github-app-token
+      with:
+        app_id: ${{ secrets.GIT_APP_ID }}
+        private_key: ${{ secrets.GIT_APP_PRIVATE_KEY }}
+        # Please note these variables cannot be stored as environment variables due to being multiline and this causing errors.
+
+      # Replace git url to be able to clone private tf modules.
+    - name: Use Github Credenitals Token (shared modules)
+      run: |
+        git config --local --remove-section http."https://github.com/"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/<>".insteadOf "https://github.com/<>"
+      env:
+        GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Terraform Init
+      run: |
+        terraform init -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    - name: Download Plan Artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: ${{ env.TF_WORKSPACE }}_plan
+        path: ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform
 
     - name: Terraform Apply
-      if: github.ref_name == 'dev' || github.ref_name == 'test' || github.ref_name == 'prod'
-      run: |
-        terraform apply terraform.plan
+      run: terraform apply terraform.plan
 
-    - name: Azure Logout
-      uses: azure/CLI@v1
+  test-plan:
+    if: github.event_name != 'pull_request'
+    needs: [ dev-plan, dev-apply]
+    name: 'Test - Terraform Plan'
+    runs-on: pcoe-runner-linux-prod
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: terraform-plan-test
+    env:
+      TF_WORKSPACE: test
+      ARM_TENANT_ID: <>   
+      TERRAFORM_VERSION: 1.2.1
+      ARM_SUBSCRIPTION_ID: <>
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1       
+      with: 
+        creds: ${{ secrets.AZURE_CREDENTIALS_TEST }}
+
+    - name: Get Github Credenitals Token (shared modules)
+      uses: tibdex/github-app-token@v1.7.0
+      id: get-github-app-token
       with:
-        inlineScript: |
-          az logout
-          az cache purge
-          az account clear
+        app_id: ${{ secrets.GIT_APP_ID }}
+        private_key: ${{ secrets.GIT_APP_PRIVATE_KEY }}
+        # Please note these variables cannot be stored as environment variables due to being multiline and this causing errors.
+ 
+      # Replace git url to be able to clone private tf modules.
+    - name: Use Github Credenitals Token (shared modules)
+      run: |
+        git config --local --remove-section http."https://github.com/"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/<>".insteadOf "https://github.com/<>"
+      env:
+        GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
+        
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Terraform Init
+      run: |
+        terraform init -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -backend-config=storage_account_name=testbuildtrdhcyiqcssa -backend-config=container_name=tfstate -backend-config=key=terraform.tfstate -backend-config=resource_group_name=test-buildiq-cs-rg -backend-config=subscription_id=${{ env.ARM_SUBSCRIPTION_ID }} -backend-config=tenant_id=${{ env.ARM_TENANT_ID }} -backend-config=client_id=${{ env.ARM_CLIENT_ID }} -backend-config=client_secret=${{ env.ARM_CLIENT_SECRET }}
+    
+    - name: Terraform Validate
+      run: terraform validate    
+
+    - name: Terraform Plan
+      run: |
+        terraform plan -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -out=terraform.plan
+
+    - name: Upload Plan Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.TF_WORKSPACE }}_plan
+        path: |
+          ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform/terraform.plan
+          ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform/terraform_plan.txt
+
+  test-apply:
+    if: github.event_name != 'pull_request'
+    needs: [ dev-plan, dev-apply, test-plan ]
+    name: 'Test - Terraform Apply'
+    runs-on: pcoe-runner-linux-prod
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: terraform-apply-test
+    env:
+      TF_WORKSPACE: test
+      ARM_TENANT_ID: <>
+      TERRAFORM_VERSION: 1.2.1
+      ARM_SUBSCRIPTION_ID: <>
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS_TEST }}
+
+    - name: Get Github Credenitals Token (shared modules)
+      uses: tibdex/github-app-token@v1.7.0
+      id: get-github-app-token
+      with:
+        app_id: ${{ secrets.GIT_APP_ID }}
+        private_key: ${{ secrets.GIT_APP_PRIVATE_KEY }}
+        # Please note these variables cannot be stored as environment variables due to being multiline and this causing errors.
+
+      # Replace git url to be able to clone private tf modules.
+    - name: Use Github Credenitals Token (shared modules)
+      run: |
+        git config --local --remove-section http."https://github.com/"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/<>".insteadOf "https://github.com/<>"
+      env:
+        GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Terraform Init
+      run: |
+        terraform init -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -backend-config=storage_account_name=testaerbgewtbbuildiqcssa -backend-config=container_name=tfstate -backend-config=key=terraform.tfstate -backend-config=resource_group_name=test-buildiq-cs-rg -backend-config=subscription_id=${{ env.ARM_SUBSCRIPTION_ID }} -backend-config=tenant_id=${{ env.ARM_TENANT_ID }} -backend-config=client_id=${{ env.ARM_CLIENT_ID }} -backend-config=client_secret=${{ env.ARM_CLIENT_SECRET }}
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    - name: Download Plan Artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: ${{ env.TF_WORKSPACE }}_plan
+        path: ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform
+
+    - name: Terraform Apply
+      run: terraform apply terraform.plan
+
+  prod-plan:
+    if: github.event_name != 'pull_request'
+    needs: [ dev-plan, dev-apply, test-plan, test-apply ]
+    name: 'Prod - Terraform Plan'
+    runs-on: pcoe-runner-linux-prod
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: terraform-plan-prod
+    env:
+      TF_WORKSPACE: prod
+      ARM_TENANT_ID: <>   
+      TERRAFORM_VERSION: 1.2.1
+      ARM_SUBSCRIPTION_ID: <>
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1       
+      with: 
+        creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+
+    - name: Get Github Credenitals Token (shared modules)
+      uses: tibdex/github-app-token@v1.7.0
+      id: get-github-app-token
+      with:
+        app_id: ${{ secrets.GIT_APP_ID }}
+        private_key: ${{ secrets.GIT_APP_PRIVATE_KEY }}
+        # Please note these variables cannot be stored as environment variables due to being multiline and this causing errors.
+ 
+      # Replace git url to be able to clone private tf modules.
+    - name: Use Github Credenitals Token (shared modules)
+      run: |
+        git config --local --remove-section http."https://github.com/"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/<>".insteadOf "https://github.com/><"
+      env:
+        GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
+        
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+    
+    - name: Terraform Init
+      run: |
+        terraform init -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -backend-config=storage_account_name=produvjgchbuildiqcssa -backend-config=container_name=tfstate -backend-config=key=terraform.tfstate -backend-config=resource_group_name=prod-buildiq-cs-rg -backend-config=subscription_id=${{ env.ARM_SUBSCRIPTION_ID }} -backend-config=tenant_id=${{ env.ARM_TENANT_ID }} -backend-config=client_id=${{ env.ARM_CLIENT_ID }} -backend-config=client_secret=${{ env.ARM_CLIENT_SECRET }}
+    
+    - name: Terraform Validate
+      run: terraform validate    
+
+    - name: Terraform Plan
+      run: |
+        terraform plan -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -out=terraform.plan
+
+    - name: Upload Plan Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.TF_WORKSPACE }}_plan
+        path: |
+          ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform/terraform.plan
+          ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform/terraform_plan.txt
+
+  prod-apply:
+    if: github.event_name != 'pull_request'
+    needs: [ dev-plan, dev-apply, test-plan, test-apply, prod-plan ]
+    name: 'Prod - Terraform Apply'
+    runs-on: pcoe-runner-linux-prod
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: terraform-apply-prod
+    env:
+      TF_WORKSPACE: prod
+      ARM_TENANT_ID: <>
+      TERRAFORM_VERSION: 1.2.1
+      ARM_SUBSCRIPTION_ID: <>
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+
+    - name: Get Github Credenitals Token (shared modules)
+      uses: tibdex/github-app-token@v1.7.0
+      id: get-github-app-token
+      with:
+        app_id: ${{ secrets.GIT_APP_ID }}
+        private_key: ${{ secrets.GIT_APP_PRIVATE_KEY }}
+        # Please note these variables cannot be stored as environment variables due to being multiline and this causing errors.
+
+      # Replace git url to be able to clone private tf modules.
+    - name: Use Github Credenitals Token (shared modules)
+      run: |
+        git config --local --remove-section http."https://github.com/"
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/<>".insteadOf "https://github.com/<>"
+      env:
+        GH_TOKEN: ${{ steps.get-github-app-token.outputs.token }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Terraform Init
+      run: |
+        terraform init -var-file=vars/${{ env.TF_WORKSPACE }}.tfvars -backend-config=storage_account_name=prodbuhgcvk009-ildiqcssa -backend-config=container_name=tfstate -backend-config=key=terraform.tfstate -backend-config=resource_group_name=prod-buildiq-cs-rg -backend-config=subscription_id=${{ env.ARM_SUBSCRIPTION_ID }} -backend-config=tenant_id=${{ env.ARM_TENANT_ID }} -backend-config=client_id=${{ env.ARM_CLIENT_ID }} -backend-config=client_secret=${{ env.ARM_CLIENT_SECRET }}
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    - name: Download Plan Artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: ${{ env.TF_WORKSPACE }}_plan
+        path: ${{ github.workspace }}/${{ env.REPOSITORY_NAME }}/terraform
+
+    - name: Terraform Apply
+      run: terraform apply terraform.plan
